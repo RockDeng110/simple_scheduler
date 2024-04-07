@@ -3,4 +3,4 @@
 
 
 ## REFERENCE:
-[SchedImplementation.pdf](https://homes.cs.washington.edu/~shwetak/classes/ee472/notes/SchedImplementation.pdf)
+* [SchedImplementation.pdf](https://homes.cs.washington.edu/~shwetak/classes/ee472/notes/SchedImplementation.pdf)
