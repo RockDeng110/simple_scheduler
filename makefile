@@ -2,7 +2,8 @@
 CC = gcc
 
 # Compiler flags
-CFLAGS = -Wall -Wextra -pedantic -std=c11
+CFLAGS = -Wall -Wextra -pedantic -std=c11 -g
+LDFLAGS = -lrt
 
 # Source files
 SRC = scheduler.c
@@ -22,7 +23,7 @@ all: $(EXEC)
 
 # Link object files into executable
 $(EXEC): $(OBJ)
-	$(CC) $(OBJ) -o $(EXEC)
+	$(CC) $(OBJ) -o $(EXEC) $(LDFLAGS)
 
 # Clean up
 clean:

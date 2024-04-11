@@ -6,11 +6,15 @@
  *
  *
  * */
+#define _POSIX_C_SOURCE 199309
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <signal.h>
+#include <time.h>
 
+#define TIMER_SIGNAL SIGRTMIN+1
 
 /**
  * @Breif task status
@@ -31,13 +35,14 @@ typedef void (*fp)(void *para);
  */
 typedef struct task_cb{
     char name[50];
-    int id;
-    //int priority;
-    //int execution_time;
-    void *para;
     fp func;
     task_cb *next;
     task_cb *prev;
+    int id;
+    int priority;
+    int execution_time;
+    int wait_time;
+    void *para;
     TASK_STATUS status;
 } task_cb;
 
@@ -63,7 +68,7 @@ int  list_insert_end(task_cb **head_p, task_cb *target){
     /* when the list is empty */
     if (head == NULL){
         *head_p = target;
-        printf("[%s] insert first member: %s.\n", __FUNCTION__, (*head_p)->name);
+        printf("[%s] insert first member. id:%d name:%s.\n", __FUNCTION__, (*head_p)->id, (*head_p)->name);
         return 0;
     }
 
@@ -88,9 +93,11 @@ int  list_insert_end(task_cb **head_p, task_cb *target){
  *
  * @Returns
  */
-task_cb* list_delete_m(task_cb *head, int id){
-    task_cb *temp = head;
+task_cb* list_delete_m(task_cb **head_p, int id){
+    printf("[list_delete_m]\n");
+    task_cb *head = *head_p;
     task_cb *delete;
+    task_cb *temp;
 
     /* the list is empty */
     if (head == NULL){
@@ -98,19 +105,43 @@ task_cb* list_delete_m(task_cb *head, int id){
     }
 
     /* try to find the member via its id */
+    temp = head;
     while (temp->id != id){
-        temp = temp->next;
+        if (temp->next != NULL){
+            temp = temp->next;
+        }
+        else {
+            return -1; /* didn't find the task in this list */
+        }
     }
 
-    if (temp->next == NULL && temp->id != id){
-        return -1; /* didn't find the task in this list */
-    }
+    //if (temp->next == NULL && temp->id != id){
+    //    return -1; /* didn't find the task in this list */
+    //}
 
     /* found the task and deleted it from the list */
     delete = temp;
-    if (temp->next == NULL){
-       temp->prev->next = NULL;
-       temp->prev = NULL;
+    /* replace its previous' next */
+    if (delete->prev != NULL){
+        delete->prev->next = delete->next;
+    }
+    else {
+        /* When this is the first node, the head */
+        *head_p = delete->next;
+        if (*head_p != NULL){
+            (*head_p)->prev = NULL;
+        }
+
+    }
+    /* replace its next's previous */
+    if (delete->next != NULL){
+        delete->next->prev = delete->prev;
+    }
+    else {
+        /* when this is the last node */
+        if (delete->prev != NULL){
+            delete->prev->next = NULL;
+        }
     }
 
     return delete;
@@ -137,6 +168,38 @@ int list_test(task_cb *head){
 
 }
 
+void switch_taskstate(task_cb **from, task_cb **to, task_cb *who){
+    printf("[switch_taskstate]\n");
+    list_delete_m(from, who->id);
+    list_insert_end(to, who);
+}
+
+void timer_handler(int sig, siginfo_t *si, void *uc) {
+    task_cb *tobe_switch;
+    task_cb *head = wait_list;
+
+    //printf("System Timer Expired.\n");
+    if (head == NULL){
+        /* do nothing */
+    }
+
+    printf("[timer_handler]\n");
+    task_cb *temp = head;
+    while(temp != NULL){
+        if (temp->wait_time > 0){
+            temp->wait_time--;
+            temp = temp->next;
+            printf("[timer_handler] id:%d wait:%d\n", temp->id, temp->wait_time);
+        }
+        else {
+            tobe_switch = temp;
+            temp = temp->next;
+            switch_taskstate(&wait_list, &ready_list, tobe_switch);
+        }
+    }
+}
+
+
 
 /**
  * @Breif Init a task
@@ -154,9 +217,18 @@ void init_task(task_cb *t, int id, char *name, void *funcp, void *para){
     t->para = para;
     t->prev = NULL;
     t->next = NULL;
+    t->wait_time = 0;
     list_insert_end(&ready_list, t);
 }
 
+void delay(int sec){
+    printf("[delay] curr id:%d\n", curr->id);
+    /* set its wait time */
+    curr->wait_time = sec;
+    /* set state of curr to wait */
+    switch_taskstate(&ready_list, &wait_list, curr);
+
+}
 
 
 /**
@@ -191,12 +263,21 @@ int start_scheduler(void) {
 void print_taskname(void *p){
     task_cb *pa = (task_cb *)p;
     printf("start %s\n", pa->name);
-    //printf("start \n");
-    sleep(1);
+    delay(1);
+    //sleep(1);
+}
+
+void print_taskid(void *p){
+    task_cb *pa = (task_cb *)p;
+    printf("start id:%d\n", pa->id);
+    delay(1);
+    //sleep(1);
 }
 
 void func_b(void *p){
-    return 0;
+    printf("func_b\n");
+    delay(3);
+    //sleep(3);
 }
 
 /**
@@ -205,11 +286,48 @@ void func_b(void *p){
  * @Returns
  */
 int main() {
+    /* Time init */
+    timer_t timerid;
+    struct sigevent sev;
+    struct itimerspec its;
+    struct sigaction sa;
+
+    // Set up signal handler for the timer
+    sa.sa_flags = SA_SIGINFO;
+    sa.sa_sigaction = timer_handler;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(TIMER_SIGNAL, &sa, NULL) == -1) {
+        perror("sigaction");
+        exit(EXIT_FAILURE);
+    }
+
+    // Set up timer expiration
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = TIMER_SIGNAL;
+    sev.sigev_value.sival_ptr = &timerid;
+
+    if (timer_create(CLOCK_REALTIME, &sev, &timerid) == -1) {
+        perror("timer_create");
+        exit(EXIT_FAILURE);
+    }
+
+    its.it_value.tv_sec = 2;  // Initial expiration in seconds
+    its.it_value.tv_nsec = 0;
+    its.it_interval.tv_sec = 2;  // Interval for subsequent expiration
+    its.it_interval.tv_nsec = 0;
+
+    if (timer_settime(timerid, 0, &its, NULL) == -1) {
+        perror("timer_settime");
+        exit(EXIT_FAILURE);
+    }
+
+
+    /* task init */
     task_cb task_1;
     task_cb task_2;
-    init_task(&task_1, 0, "12345678901112131415", (void *)(&print_taskname), NULL);
-    init_task(&task_2, 1, "abcdddddddddd", (void *)(&print_taskname), NULL);
-    list_test(ready_list);
+    init_task(&task_1, 0, "12345678901112131415", (void *)(&print_taskid), NULL);
+    init_task(&task_2, 1, "abcdddddddddd", (void *)(&print_taskid), NULL);
+    //list_test(ready_list);
     start_scheduler();
 
     return 0;
