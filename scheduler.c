@@ -13,6 +13,7 @@
 #include <string.h>
 #include <signal.h>
 #include <time.h>
+#include <pthread.h>
 
 #define TIMER_SIGNAL SIGRTMIN+1
 
@@ -29,6 +30,8 @@ typedef struct task_parameter task_parameter_s;
 typedef struct task_cb task_cb;
 /* define the function point for task */
 typedef void (*fp)(void *para);
+
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 /**
  * @Breif task control block
@@ -80,7 +83,7 @@ int  list_insert_end(task_cb **head_p, task_cb *target){
 
     temp->next = target;
     target->prev = temp;
-    printf("[%s] insert member: %s.\n", __FUNCTION__, temp->next->name);
+    printf("[%s] insert member. id:%d name:%s.\n", __FUNCTION__, temp->next->id, temp->next->name);
 
     return 0;
 }
@@ -143,6 +146,9 @@ task_cb* list_delete_m(task_cb **head_p, int id){
             delete->prev->next = NULL;
         }
     }
+    /* reset its prev and next */
+    delete->next = NULL;
+    delete->prev = NULL;
 
     return delete;
 }
@@ -162,7 +168,7 @@ int list_test(task_cb *head){
 
     task_cb *temp = head;
     while(temp != NULL){
-        printf("List current member:%s\n", temp->name);
+        printf("List current member. id:%d wait:%d name:%s\n", temp->id, temp->wait_time, temp->name);
         temp = temp->next;
     }
 
@@ -172,15 +178,20 @@ void switch_taskstate(task_cb **from, task_cb **to, task_cb *who){
     printf("[switch_taskstate]\n");
     list_delete_m(from, who->id);
     list_insert_end(to, who);
+    list_test(wait_list);
 }
 
-void timer_handler(int sig, siginfo_t *si, void *uc) {
+void timer_handler(union sigval sv) {
+//void timer_handler(int sig, siginfo_t *si, void *uc) {
     task_cb *tobe_switch;
     task_cb *head = wait_list;
 
+    //pthread_mutex_lock(&mutex);
     //printf("System Timer Expired.\n");
     if (head == NULL){
         /* do nothing */
+        //pthread_mutex_unlock(&mutex);
+        return;
     }
 
     printf("[timer_handler]\n");
@@ -188,15 +199,17 @@ void timer_handler(int sig, siginfo_t *si, void *uc) {
     while(temp != NULL){
         if (temp->wait_time > 0){
             temp->wait_time--;
-            temp = temp->next;
             printf("[timer_handler] id:%d wait:%d\n", temp->id, temp->wait_time);
+            temp = temp->next;
         }
         else {
+            printf("[timer_handler] swith to ready. id:%d\n", temp->id);
             tobe_switch = temp;
             temp = temp->next;
             switch_taskstate(&wait_list, &ready_list, tobe_switch);
         }
     }
+    //pthread_mutex_unlock(&mutex);
 }
 
 
@@ -221,12 +234,17 @@ void init_task(task_cb *t, int id, char *name, void *funcp, void *para){
     list_insert_end(&ready_list, t);
 }
 
-void delay(int sec){
+void delay_s(int sec){
+    task_cb *temp;
     printf("[delay] curr id:%d\n", curr->id);
     /* set its wait time */
+    //pthread_mutex_lock(&mutex);
     curr->wait_time = sec;
+    temp = curr;
+    curr = temp->next;
     /* set state of curr to wait */
-    switch_taskstate(&ready_list, &wait_list, curr);
+    switch_taskstate(&ready_list, &wait_list, temp);
+    //pthread_mutex_unlock(&mutex);
 
 }
 
@@ -238,13 +256,28 @@ void delay(int sec){
  */
 int start_scheduler(void) {
     printf("%s started.\n", __FUNCTION__);
+
+    struct timespec ts;
+    ts.tv_sec = 1; // 1 seconds
+    ts.tv_nsec = 0;
+
     curr = ready_list;
     for (;;){
+        printf("[start_scheduler]\n");
+        //pthread_mutex_lock(&mutex);
         if (curr == NULL){ /* no ready task */
-            sleep(5);
+            //nanosleep(&ts, NULL);
+            sleep(1);
+            printf("[start_scheduler] no ready task.\n");
+            /* update curr */
+            curr = ready_list;
         }
         else {
             curr->func(curr);
+            if (curr == NULL){
+                //pthread_mutex_unlock(&mutex);
+                continue;
+            }
             if (curr->next == NULL){
                 curr = ready_list;
             }
@@ -252,6 +285,7 @@ int start_scheduler(void) {
                 curr = curr->next;
             }
         }
+        //pthread_mutex_unlock(&mutex);
     }
 }
 
@@ -261,22 +295,26 @@ int start_scheduler(void) {
  * @Param p
  */
 void print_taskname(void *p){
+    //pthread_mutex_lock(&mutex);
     task_cb *pa = (task_cb *)p;
     printf("start %s\n", pa->name);
-    delay(1);
+    //pthread_mutex_unlock(&mutex);
+    delay_s(1);
     //sleep(1);
 }
 
 void print_taskid(void *p){
+    //pthread_mutex_lock(&mutex);
     task_cb *pa = (task_cb *)p;
-    printf("start id:%d\n", pa->id);
-    delay(1);
+    printf("start taskid. id:%d\n", pa->id);
+    //pthread_mutex_unlock(&mutex);
+    delay_s(5);
     //sleep(1);
 }
 
 void func_b(void *p){
-    printf("func_b\n");
-    delay(3);
+    printf("start func_b.\n");
+    delay_s(10);
     //sleep(3);
 }
 
@@ -286,48 +324,29 @@ void func_b(void *p){
  * @Returns
  */
 int main() {
-    /* Time init */
-    timer_t timerid;
+
+    // Create and arm a POSIX timer
     struct sigevent sev;
+    timer_t timerid;
     struct itimerspec its;
-    struct sigaction sa;
-
-    // Set up signal handler for the timer
-    sa.sa_flags = SA_SIGINFO;
-    sa.sa_sigaction = timer_handler;
-    sigemptyset(&sa.sa_mask);
-    if (sigaction(TIMER_SIGNAL, &sa, NULL) == -1) {
-        perror("sigaction");
-        exit(EXIT_FAILURE);
-    }
-
-    // Set up timer expiration
-    sev.sigev_notify = SIGEV_SIGNAL;
-    sev.sigev_signo = TIMER_SIGNAL;
+    sev.sigev_notify = SIGEV_THREAD;
+    sev.sigev_notify_function = timer_handler;
     sev.sigev_value.sival_ptr = &timerid;
-
-    if (timer_create(CLOCK_REALTIME, &sev, &timerid) == -1) {
-        perror("timer_create");
-        exit(EXIT_FAILURE);
-    }
-
-    its.it_value.tv_sec = 2;  // Initial expiration in seconds
+    timer_create(CLOCK_REALTIME, &sev, &timerid);
+    its.it_value.tv_sec = 1; // 1 second interval
     its.it_value.tv_nsec = 0;
-    its.it_interval.tv_sec = 2;  // Interval for subsequent expiration
+    its.it_interval.tv_sec = 1;
     its.it_interval.tv_nsec = 0;
-
-    if (timer_settime(timerid, 0, &its, NULL) == -1) {
-        perror("timer_settime");
-        exit(EXIT_FAILURE);
-    }
+    timer_settime(timerid, 0, &its, NULL);
 
 
     /* task init */
     task_cb task_1;
     task_cb task_2;
-    init_task(&task_1, 0, "12345678901112131415", (void *)(&print_taskid), NULL);
-    init_task(&task_2, 1, "abcdddddddddd", (void *)(&print_taskid), NULL);
-    //list_test(ready_list);
+    init_task(&task_1, 0, "The first task", (void *)(&print_taskid), NULL);
+    init_task(&task_2, 1, "The second task", (void *)(&func_b), NULL);
+    list_test(ready_list);
+
     start_scheduler();
 
     return 0;
